@@ -62,7 +62,6 @@ except ImportError:
         raise ImportError('Python GDAL library not found, please install '
                           'python-gdal')
 
-
 RESAM_GDAL = ['AVERAGE', 'BILINEAR', 'CUBIC', 'CUBIC_SPLINE', 'LANCZOS',
               'MODE', 'NEAREST_NEIGHBOR']
 SINU_WKT = 'PROJCS["Sinusoidal_Sanson_Flamsteed",GEOGCS["GCS_Unknown",' \
@@ -115,6 +114,7 @@ class convertModisGDAL:
         # Open source dataset
         self.in_name = hdfname
         self.src_ds = gdal.Open(self.in_name)
+        self.meta = self.src_ds.GetMetadata()
         self.layers = self.src_ds.GetSubDatasets()
         self.output_pref = prefix
         self.resolution = res
@@ -142,6 +142,7 @@ class convertModisGDAL:
         else:
             raise Exception('Type for subset parameter not supported')
         self.driver = gdal.GetDriverByName(outformat)
+        self.mem_driver = gdal.GetDriverByName('MEM')
         self.vrt = vrt
         if self.driver is None:
             raise Exception('Format driver %s not found, pick a supported '
@@ -219,14 +220,55 @@ class convertModisGDAL:
         """For the progress status"""
         return 1  # 1 to continue, 0 to stop
 
-    def _reprojectOne(self, l, quiet=False):
+    def _reproject(self, l, use_subset=False, quiet=False):
         """Reproject a single subset of MODIS product
 
+        l = complete name of input dataset or list of layers
+        """
+        out_name = "{pref}.tif".format(pref=self.output_pref)
+        number_of_bands = self._calculateNumberOfBands(l, use_subset)
+        try:            
+            src_proj, datatype = self._getProjectionAndDataType(l, use_subset)            
+            dst_ds = self.mem_driver.Create(out_name, self.dst_xsize,
+                                        self.dst_ysize, number_of_bands, datatype)
+        except:
+            raise Exception('Not possible to create dataset %s' % out_name)
+        dst_ds.SetProjection(self.dst_wkt)
+        dst_ds.SetGeoTransform(self.dst_gt)
+        dst_ds.SetMetadata(self.meta)            
+        if use_subset and (isinstance(l, list)):
+            n = 0
+            for i in self.subset:
+                if str(i) == '1':
+                    layer_ds = self._reprojectLayer(dst_ds, l[n][0], n, quiet=quiet)
+                n = n + 1            
+        else:
+            layer_ds = self._reprojectLayer(dst_ds, l, 0, quiet=quiet)
+        cbk = self._progressCallback
+        # value for last parameter of above self._progressCallback
+        cbk_user_data = None
+        try:
+            # copy in-memory dataset to output file via output driver
+            self.driver.CreateCopy(out_name, dst_ds)
+            if not quiet:
+                print("Layer {name} reprojected".format(name=out_name))
+        except Exception as e:
+            raise Exception('Not possible to reproject dataset '
+                            '{name} {e}'.format(name=l, e=e))              
+        dst_ds = None
+        l_src_ds = None
+        return 0
+
+    def _reprojectLayer(self, dst_ds, l, bandnum, quiet=False):
+        """Add a single subset of MODIS product as a raster band
+
+        dst_ds = output dataset
         l = complete name of input dataset
+        bandnum = band number for output dataset
         """
         l_src_ds = gdal.Open(l)
         meta = l_src_ds.GetMetadata()
-        band = l_src_ds.GetRasterBand(1)
+        band = l_src_ds.GetRasterBand(1)     
         if '_FillValue' in list(meta.keys()):
             fill_value = meta['_FillValue']
         elif band.GetNoDataValue():
@@ -234,40 +276,55 @@ class convertModisGDAL:
         else:
             fill_value = None
         datatype = band.DataType
-        try:
-            l_name = l.split(':')[-1]
-            out_name = "{pref}_{lay}.tif".format(pref=self.output_pref,
-                                                 lay=l_name)
-        except:
-            out_name = "{pref}.tif".format(pref=self.output_pref)
-        if self.vrt:
-            out_name = "{pref}.tif".format(pref=self.output_pref)
-        try:
-            dst_ds = self.driver.Create(out_name, self.dst_xsize,
+        unit_type = band.GetUnitType()
+                
+        tmp_ds = self.mem_driver.Create('', self.dst_xsize,
                                         self.dst_ysize, 1, datatype)
-        except:
-            raise Exception('Not possible to create dataset %s' % out_name)
-        dst_ds.SetProjection(self.dst_wkt)
-        dst_ds.SetGeoTransform(self.dst_gt)
-        if fill_value:
-            dst_ds.GetRasterBand(1).SetNoDataValue(float(fill_value))
-            dst_ds.GetRasterBand(1).Fill(float(fill_value))
+        tmp_ds.SetProjection(self.dst_wkt)
+        tmp_ds.SetGeoTransform(self.dst_gt)
         cbk = self._progressCallback
         # value for last parameter of above self._progressCallback
         cbk_user_data = None
-        try:
-            gdal.ReprojectImage(l_src_ds, dst_ds, l_src_ds.GetProjection(),
-                                self.dst_wkt, self.resampling, 0,
-                                self.error_threshold, cbk, cbk_user_data)
-            if not quiet:
-                print("Layer {name} reprojected".format(name=l))
-        except:
-            raise Exception('Not possible to reproject dataset '
-                            '{name}'.format(name=l))
-        dst_ds.SetMetadata(meta)
-        dst_ds = None
-        l_src_ds = None
-        return 0
+        # reproject band to in-memory data set in order to retrieve 
+        # reprojected data array    
+        gdal.ReprojectImage(l_src_ds, tmp_ds, l_src_ds.GetProjection(),
+                                 self.dst_wkt, self.resampling, 0,
+                                 self.error_threshold, cbk, cbk_user_data) 
+        data = tmp_ds.ReadAsArray()        
+        if fill_value:
+            raster_band = dst_ds.GetRasterBand(bandnum + 1)
+            raster_band.SetNoDataValue(float(fill_value))
+            raster_band.Fill(float(fill_value))
+            raster_band.SetUnitType(unit_type)
+            raster_band.SetMetadata(meta)
+            raster_band.WriteArray(data)
+            try:
+                l_name = l.split(':')[-1]
+                raster_band.SetCategoryNames([l_name])
+                raster_band.SetDescription(l_name)           
+            except Exception as e:                
+                print("failed to set description {} {}".format(e, l.split(':'))) 
+                pass
+        return l_src_ds
+
+    def _calculateNumberOfBands(self, l, use_subset):
+        n = 1
+        if use_subset and (isinstance(l, list)):
+            for i in self.subset:
+                if str(i) == '1':
+                    n += 1
+        return n
+
+    def _getProjectionAndDataType(self, l, use_subset):
+        if use_subset and (isinstance(l, list)):
+            ds = gdal.Open(l[0][0])
+        else:
+            ds = gdal.Open(l)
+        band = ds.GetRasterBand(1)
+        dataType = band.DataType
+        proj = ds.GetProjection()
+        del ds
+        return proj, dataType
 
     def run_vrt_separated(self):
         """Reproject VRT created by createMosaicGDAL, function write_vrt with
@@ -284,11 +341,7 @@ class convertModisGDAL:
             return
         else:
             self._createWarped(self.layers[0][0])
-            n = 0
-            for i in self.subset:
-                if str(i) == '1':
-                    self._reprojectOne(self.layers[n][0], quiet=quiet)
-                n = n + 1
+            self._reproject(self.layers, use_subset=True, quiet=quiet)
             if not quiet:
                 print("All layer for dataset '{name}' "
                       "reprojected".format(name=self.in_name))
