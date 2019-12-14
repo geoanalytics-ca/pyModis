@@ -308,7 +308,7 @@ class convertModisGDAL:
         return l_src_ds
 
     def _calculateNumberOfBands(self, l, use_subset):
-        n = 1
+        n = 0
         if use_subset and (isinstance(l, list)):
             for i in self.subset:
                 if str(i) == '1':
