@@ -91,6 +91,8 @@ def main():
                       default=False, help="Read from a GDAL VRT file.")
     groupG.add_option("--formats", dest="formats", action="store_true",
                       help="print supported GDAL formats")
+    groupG.add_option("--overview", action='append', dest="overviews", help="Overview levels (can specificy multiple)")
+    groupG.add_option("--gdal-options", action='append', help="GDAL options (can specify multiple)")
     # options only for MRT
     groupM.add_option("-m", "--mrt", dest="mrt_path", type='directory',
                       help="the path to MRT software", metavar="MRT_PATH")
@@ -156,7 +158,9 @@ def main():
                                                          options.epsg,
                                                          options.wkt,
                                                          options.resampling,
-                                                         options.vrt)
+                                                         options.overviews,
+                                                         options.vrt,
+                                                         options.gdal_options)
     modisConver.run()
 
 if __name__ == "__main__":

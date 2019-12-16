@@ -92,6 +92,19 @@ def getResampling(res):
     elif res == 'CUBIC_SPLINE':
         return gdal.GRA_CubicSpline
 
+def cleanOverviews(overviews):
+    """Ensure that overviews include a list of integers, otherwise return empty list
+        :param List[str] overviews: list of integers featuring overview levels
+    """
+    overviews = overviews or []
+    try:
+        overviews = [int(x) for x in overviews]
+        overviews.sort()
+    except Exception as e:
+        print("Invalid overviews {}, defaulting to empty list".format(e))
+        return []
+
+    return overviews
 
 class convertModisGDAL:
     """A class to convert modis data from hdf to GDAL formats using GDAL
@@ -105,11 +118,14 @@ class convertModisGDAL:
        :param int epsg: the EPSG code for the preojection of output file
        :param str wkt: the WKT string for the preojection of output file
        :param str resampl: the resampling method to use
+       :param list overviews: list of integers representing if none are specified, the image will have no overviews       
        :param bool vrt: True to read GDAL VRT file created with
                         createMosaicGDAL
+       :param List gdal_options: List of options fed into CreateCopy command       
     """
     def __init__(self, hdfname, prefix, subset, res, outformat="GTiff",
-                 epsg=None, wkt=None, resampl='NEAREST_NEIGHBOR', vrt=False):
+                 epsg=None, wkt=None, resampl='NEAREST_NEIGHBOR', overviews = None,
+                 vrt=False, gdal_options=None):
         """Function for the initialize the object"""
         # Open source dataset
         self.in_name = hdfname
@@ -135,6 +151,8 @@ class convertModisGDAL:
         # error threshold the same value as gdalwarp
         self.error_threshold = 0.125
         self.resampling = getResampling(resampl)
+        self.resampling_str = resampl
+        self.overviews = cleanOverviews(overviews)
         if isinstance(subset, list):
             self.subset = subset
         elif isinstance(subset, str):
@@ -147,6 +165,12 @@ class convertModisGDAL:
         if self.driver is None:
             raise Exception('Format driver %s not found, pick a supported '
                             'driver.' % outformat)
+        if isinstance(gdal_options, list):
+            self.gdal_options = gdal_options
+        elif isinstance(gdal_options, str):
+            self.gdal_options = [gdal_options]
+        else:
+            self.gdal_options = []
 
     def _boundingBox(self, src):
         """Obtain the bounding box of raster in the new coordinate system
@@ -220,10 +244,9 @@ class convertModisGDAL:
         """For the progress status"""
         return 1  # 1 to continue, 0 to stop
 
-    def _reproject(self, l, use_subset=False, quiet=False):
-        """Reproject a single subset of MODIS product
-
-        l = complete name of input dataset or list of layers
+    def _reproject(self, l, resample="NearestNeighbour", use_subset=False, quiet=False):
+        """Reproject a single subset of MODIS product        
+        :param Union[str, list] l: complete name of input dataset or list of layers                
         """
         out_name = "{pref}.tif".format(pref=self.output_pref)
         number_of_bands = self._calculateNumberOfBands(l, use_subset)
@@ -244,14 +267,14 @@ class convertModisGDAL:
                 n = n + 1            
         else:
             layer_ds = self._reprojectLayer(dst_ds, l, 0, quiet=quiet)
+        if self.overviews and (isinstance(self.overviews, list)):            
+            dst_ds.BuildOverviews(self.resampling_str, self.overviews)
         cbk = self._progressCallback
         # value for last parameter of above self._progressCallback
         cbk_user_data = None
         try:
-            # copy in-memory dataset to output file via output driver
-            self.driver.CreateCopy(out_name, dst_ds)
-            if not quiet:
-                print("Layer {name} reprojected".format(name=out_name))
+            # copy in-memory dataset to output file via output driver            
+            self.driver.CreateCopy(out_name, dst_ds, options=self.gdal_options)            
         except Exception as e:
             raise Exception('Not possible to reproject dataset '
                             '{name} {e}'.format(name=l, e=e))              
@@ -301,7 +324,9 @@ class convertModisGDAL:
             try:
                 l_name = l.split(':')[-1]
                 raster_band.SetCategoryNames([l_name])
-                raster_band.SetDescription(l_name)           
+                raster_band.SetDescription(l_name)
+                if not quiet:
+                    print("Layer {name} reprojected".format(name=l_name))    
             except Exception as e:                
                 print("failed to set description {} {}".format(e, l.split(':'))) 
                 pass
